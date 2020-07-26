@@ -106,6 +106,7 @@ type DaprRuntime struct {
 	daprHTTPAPI            http.API
 	operatorClient         operatorv1pb.OperatorClient
 	topicRoutes            map[string]string
+	digitalTwinsMaps       []DigitalTwinMap
 }
 
 // NewDaprRuntime returns a new runtime with the given runtime config and global config
@@ -127,6 +128,7 @@ func NewDaprRuntime(runtimeConfig *Config, globalConfig *config.Configuration) *
 		nameResolutionRegistry: nr_loader.NewRegistry(),
 		httpMiddlewareRegistry: http_middleware_loader.NewRegistry(),
 		topicRoutes:            map[string]string{},
+		digitalTwinsMaps:       []DigitalTwinMap{},
 	}
 }
 
@@ -247,6 +249,7 @@ func (a *DaprRuntime) initRuntime(opts *runtimeOpts) error {
 	// Register and initialize bindings
 	a.bindingsRegistry.RegisterInputBindings(opts.inputBindings...)
 	a.bindingsRegistry.RegisterOutputBindings(opts.outputBindings...)
+	a.initDigitalTwins()
 	a.initBindings()
 	a.initDirectMessaging(a.nameResolver)
 
@@ -534,10 +537,45 @@ func (a *DaprRuntime) onAppResponse(response *bindings.AppResponse) error {
 	return nil
 }
 
+type TwinEvent struct {
+	Data interface{} `json:"Data"`
+}
+
 func (a *DaprRuntime) sendBindingEventToApp(bindingName string, data []byte, metadata map[string]string) error {
 	var response bindings.AppResponse
 	spanName := fmt.Sprintf("bindings/%s", bindingName)
 	ctx, span := diag.StartInternalCallbackSpan(spanName, trace.SpanContext{}, a.globalConfig.Spec.TracingSpec)
+
+	for _, dt := range a.digitalTwinsMaps {
+		if dt.InputBinding == bindingName {
+			var jsonMap map[string]interface{}
+			err := json.Unmarshal(data, &jsonMap)
+			if err != nil {
+				return fmt.Errorf("digital twins: error deserializing json from input binding: %s", err)
+			}
+
+			event := TwinEvent{
+				Data: string(data),
+			}
+			eventBytes, err := json.Marshal(event)
+			if err != nil {
+				return fmt.Errorf("digital twins: error serializing twin event :%s", err)
+			}
+
+			if jsonMap[dt.IDProperty] != nil {
+				twinID := jsonMap[dt.IDProperty].(string)
+				req := invokev1.NewInvokeMethodRequest("OnEvent")
+				req.WithActor(dt.TwinName, twinID)
+				req.WithHTTPExtension(nethttp.MethodPost, "")
+				req.WithRawData(eventBytes, "application/json")
+
+				_, err := a.actor.Call(context.Background(), req)
+				if err != nil {
+					log.Warnf("digital twins: error invoking twin from binding event: %s", err)
+				}
+			}
+		}
+	}
 
 	if a.runtimeConfig.ApplicationProtocol == GRPCProtocol {
 		ctx = diag.SpanContextToGRPCMetadata(ctx, span.SpanContext())
@@ -690,6 +728,12 @@ func (a *DaprRuntime) getSubscribedBindingsGRPC() []string {
 
 func (a *DaprRuntime) isAppSubscribedToBinding(binding string, bindingsList []string) bool {
 	// if gRPC, looks for the binding in the list of bindings returned from the app
+	for _, dt := range a.digitalTwinsMaps {
+		if dt.InputBinding == binding {
+			return true
+		}
+	}
+
 	if a.runtimeConfig.ApplicationProtocol == GRPCProtocol {
 		for _, b := range bindingsList {
 			if b == binding {
@@ -708,6 +752,39 @@ func (a *DaprRuntime) isAppSubscribedToBinding(binding string, bindingsList []st
 		return err == nil && resp.Status().Code != nethttp.StatusNotFound
 	}
 	return false
+}
+
+type DigitalTwinMap struct {
+	InputBinding string
+	TwinName     string
+	IDProperty   string
+}
+
+func (a *DaprRuntime) initDigitalTwins() {
+	mappings := []DigitalTwinMap{}
+
+	for _, c := range a.components {
+		if c.Spec.Type == "digitaltwins.mapping" {
+			var inputBinding string
+			for _, m := range c.Spec.Metadata {
+				if m.Name == "source" {
+					inputBinding = m.Value
+				} else if strings.Contains(m.Name, "map.") {
+					items := strings.Split(m.Name, ".")
+					twinName := items[1]
+					idProperty := m.Value
+
+					mappings = append(mappings, DigitalTwinMap{
+						InputBinding: inputBinding,
+						TwinName:     twinName,
+						IDProperty:   idProperty,
+					})
+				}
+			}
+		}
+	}
+
+	a.digitalTwinsMaps = mappings
 }
 
 func (a *DaprRuntime) initInputBindings(registry bindings_loader.Registry) error {

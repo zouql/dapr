@@ -100,6 +100,7 @@ func NewAPI(appID string, appChannel channel.AppChannel, directMessaging messagi
 	api.endpoints = append(api.endpoints, api.constructMetadataEndpoints()...)
 	api.endpoints = append(api.endpoints, api.constructBindingsEndpoints()...)
 	api.endpoints = append(api.endpoints, api.constructHealthzEndpoints()...)
+	api.endpoints = append(api.endpoints, api.constructDigitalTwinsEndpoints()...)
 
 	return api
 }
@@ -112,6 +113,17 @@ func (a *api) APIEndpoints() []Endpoint {
 // MarkStatusAsReady marks the ready status of dapr
 func (a *api) MarkStatusAsReady() {
 	a.readyStatus = true
+}
+
+func (a *api) constructDigitalTwinsEndpoints() []Endpoint {
+	return []Endpoint{
+		{
+			Methods: []string{fasthttp.MethodPost, fasthttp.MethodPut},
+			Route:   "twins/{twinName}/{twinID}/command",
+			Version: apiVersionV1,
+			Handler: a.onTwinCommand,
+		},
+	}
 }
 
 func (a *api) constructStateEndpoints() []Endpoint {
@@ -504,8 +516,12 @@ func (a *api) onDirectMessage(reqCtx *fasthttp.RequestCtx) {
 	// Construct internal invoke method request
 	req := invokev1.NewInvokeMethodRequest(invokeMethodName).WithHTTPExtension(verb, reqCtx.QueryArgs().String())
 	req.WithRawData(reqCtx.Request.Body(), string(reqCtx.Request.Header.ContentType()))
-	// Save headers to internal metadata
-	req.WithFastHTTPHeaders(&reqCtx.Request.Header)
+	// Save headers to metadata
+	metadata := map[string][]string{}
+	reqCtx.Request.Header.VisitAll(func(key []byte, value []byte) {
+		metadata[string(key)] = []string{string(value)}
+	})
+	req.WithMetadata(metadata)
 
 	resp, err := a.directMessaging.Invoke(reqCtx, targetID, req)
 	// err does not represent user application response
@@ -717,6 +733,51 @@ func (a *api) onDeleteActorTimer(reqCtx *fasthttp.RequestCtx) {
 	}
 }
 
+func (a *api) onTwinCommand(reqCtx *fasthttp.RequestCtx) {
+	if a.actor == nil {
+		msg := NewErrorResponse("ERR_ACTOR_RUNTIME_NOT_FOUND", "")
+		respondWithError(reqCtx, fasthttp.StatusBadRequest, msg)
+		return
+	}
+
+	twinName := reqCtx.UserValue("twinName").(string)
+	twinID := reqCtx.UserValue("twinID").(string)
+	verb := strings.ToUpper(string(reqCtx.Method()))
+	method := "OnCommand"
+
+	body := reqCtx.PostBody()
+
+	req := invokev1.NewInvokeMethodRequest(method)
+	req.WithActor(twinName, twinID)
+	req.WithHTTPExtension(verb, reqCtx.QueryArgs().String())
+	req.WithRawData(body, string(reqCtx.Request.Header.ContentType()))
+
+	// Save headers to metadata
+	metadata := map[string][]string{}
+	reqCtx.Request.Header.VisitAll(func(key []byte, value []byte) {
+		metadata[string(key)] = []string{string(value)}
+	})
+	req.WithMetadata(metadata)
+
+	resp, err := a.actor.Call(reqCtx, req)
+	if err != nil {
+		msg := NewErrorResponse("ERR_TWIN_COMMAND", err.Error())
+		respondWithError(reqCtx, fasthttp.StatusInternalServerError, msg)
+		return
+	}
+
+	invokev1.InternalMetadataToHTTPHeader(reqCtx, resp.Headers(), reqCtx.Response.Header.Set)
+	contentType, body := resp.RawData()
+	reqCtx.Response.Header.SetContentType(contentType)
+
+	// Construct response
+	statusCode := int(resp.Status().Code)
+	if !resp.IsHTTPResponse() {
+		statusCode = invokev1.HTTPStatusFromCode(codes.Code(statusCode))
+	}
+	respond(reqCtx, statusCode, body)
+}
+
 func (a *api) onDirectActorMessage(reqCtx *fasthttp.RequestCtx) {
 	if a.actor == nil {
 		msg := NewErrorResponse("ERR_ACTOR_RUNTIME_NOT_FOUND", "")
@@ -874,6 +935,11 @@ func (a *api) onDeleteActorState(reqCtx *fasthttp.RequestCtx) {
 }
 
 func (a *api) onGetMetadata(reqCtx *fasthttp.RequestCtx) {
+	reqCtx.Request.Header.VisitAll(func(key []byte, value []byte) {
+		fmt.Println(string(key))
+		fmt.Println(string(value))
+	})
+
 	temp := make(map[interface{}]interface{})
 
 	// Copy synchronously so it can be serialized to JSON.
@@ -918,7 +984,7 @@ func (a *api) onPublish(reqCtx *fasthttp.RequestCtx) {
 	span := diag_utils.SpanFromContext(reqCtx)
 	// Populate W3C traceparent to cloudevent envelope
 	corID := diag.SpanContextToW3CString(span.SpanContext())
-	envelope := pubsub.NewCloudEventsEnvelope(uuid.New().String(), a.id, pubsub.DefaultCloudEventType, corID, body)
+	envelope := pubsub.NewCloudEventsEnvelope(uuid.New().String(), a.id, pubsub.DefaultCloudEventType, corID, topic, body)
 
 	b, err := a.json.Marshal(envelope)
 	if err != nil {
