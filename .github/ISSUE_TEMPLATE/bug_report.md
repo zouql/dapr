@@ -6,7 +6,7 @@ labels: kind/bug
 assignees: ''
 
 ---
-<!-- If you need to report a security issue with Dapr, send an email to daprct@microsoft.com. -->
+<!-- If you need to report a security issue with Dapr, send an email to actionsct@microsoft.com. -->
 ## In what area(s)?
 
 <!-- Remove the '> ' to select -->
