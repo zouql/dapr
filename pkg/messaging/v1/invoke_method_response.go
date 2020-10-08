@@ -43,6 +43,10 @@ func InternalInvokeResponse(resp *internalv1pb.InternalInvokeResponse) (*InvokeM
 
 // WithMessage sets InvokeResponse pb object to Message field
 func (imr *InvokeMethodResponse) WithMessage(pb *commonv1pb.InvokeResponse) *InvokeMethodResponse {
+	if pb == nil {
+		pb = &commonv1pb.InvokeResponse{}
+	}
+
 	imr.r.Message = pb
 	return imr
 }

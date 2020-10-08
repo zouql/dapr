@@ -53,6 +53,25 @@ func TestInternalInvocationResponse(t *testing.T) {
 	})
 }
 
+func TestWithData(t *testing.T) {
+	t.Run("data is nil", func(t *testing.T) {
+		resp := NewInvokeMethodResponse(0, "OK", nil)
+		resp.WithMessage(nil)
+		assert.NotNil(t, resp.Message())
+		assert.Nil(t, resp.Message().Data)
+	})
+
+	t.Run("data is non-nil", func(t *testing.T) {
+		resp := NewInvokeMethodResponse(0, "OK", nil)
+		resp.WithMessage(&commonv1pb.InvokeResponse{
+			Data:        &any.Any{Value: []byte("response")},
+			ContentType: "application/json",
+		})
+		assert.NotNil(t, resp.Message())
+		assert.Equal(t, []byte("response"), resp.Message().Data.Value)
+	})
+}
+
 func TestResponseData(t *testing.T) {
 	t.Run("contenttype is set", func(t *testing.T) {
 		resp := NewInvokeMethodResponse(0, "OK", nil)
