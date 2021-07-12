@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -8,11 +8,12 @@ package v1
 import (
 	"testing"
 
-	commonv1pb "github.com/dapr/dapr/pkg/proto/common/v1"
-	internalv1pb "github.com/dapr/dapr/pkg/proto/internals/v1"
-	"github.com/golang/protobuf/ptypes/any"
 	"github.com/stretchr/testify/assert"
 	"github.com/valyala/fasthttp"
+	"google.golang.org/protobuf/types/known/anypb"
+
+	commonv1pb "github.com/dapr/dapr/pkg/proto/common/v1"
+	internalv1pb "github.com/dapr/dapr/pkg/proto/internals/v1"
 )
 
 func TestInvokeRequest(t *testing.T) {
@@ -35,7 +36,7 @@ func TestInternalInvokeRequest(t *testing.T) {
 		m := &commonv1pb.InvokeRequest{
 			Method:      "invoketest",
 			ContentType: "application/json",
-			Data:        &any.Any{Value: []byte("test")},
+			Data:        &anypb.Any{Value: []byte("test")},
 		}
 		pb := internalv1pb.InternalInvokeRequest{
 			Ver:     internalv1pb.APIVersion_V1,
@@ -77,7 +78,7 @@ func TestMetadata(t *testing.T) {
 	})
 
 	t.Run("HTTP headers", func(t *testing.T) {
-		var req = fasthttp.AcquireRequest()
+		req := fasthttp.AcquireRequest()
 		req.Header.Set("Header1", "Value1")
 		req.Header.Set("Header2", "Value2")
 		req.Header.Set("Header3", "Value3")
@@ -111,7 +112,7 @@ func TestData(t *testing.T) {
 
 	t.Run("typeurl is set but content_type is unset", func(t *testing.T) {
 		resp := NewInvokeMethodRequest("test_method")
-		resp.r.Message.Data = &any.Any{TypeUrl: "fake", Value: []byte("fake")}
+		resp.r.Message.Data = &anypb.Any{TypeUrl: "fake", Value: []byte("fake")}
 		contentType, bData := resp.RawData()
 		assert.Equal(t, "", contentType)
 		assert.Equal(t, []byte("fake"), bData)
@@ -136,7 +137,7 @@ func TestProto(t *testing.T) {
 	m := &commonv1pb.InvokeRequest{
 		Method:      "invoketest",
 		ContentType: "application/json",
-		Data:        &any.Any{Value: []byte("test")},
+		Data:        &anypb.Any{Value: []byte("test")},
 	}
 	pb := internalv1pb.InternalInvokeRequest{
 		Ver:     internalv1pb.APIVersion_V1,
@@ -149,4 +150,28 @@ func TestProto(t *testing.T) {
 
 	assert.Equal(t, "application/json", req2.GetMessage().ContentType)
 	assert.Equal(t, []byte("test"), req2.GetMessage().Data.Value)
+}
+
+func TestAddHeaders(t *testing.T) {
+	req := NewInvokeMethodRequest("test_method")
+	header := fasthttp.RequestHeader{}
+	header.Add("Dapr-Reentrant-Id", "test")
+	req.AddHeaders(&header)
+
+	assert.NotNil(t, req.r.Metadata)
+	assert.NotNil(t, req.r.Metadata["Dapr-Reentrant-Id"])
+	assert.Equal(t, "test", req.r.Metadata["Dapr-Reentrant-Id"].Values[0])
+}
+
+func TestAddHeadersDoesNotOverwrite(t *testing.T) {
+	header := fasthttp.RequestHeader{}
+	header.Add("Dapr-Reentrant-Id", "test")
+	req := NewInvokeMethodRequest("test_method").WithFastHTTPHeaders(&header)
+
+	header.Set("Dapr-Reentrant-Id", "test2")
+	req.AddHeaders(&header)
+
+	assert.NotNil(t, req.r.Metadata)
+	assert.NotNil(t, req.r.Metadata["Dapr-Reentrant-Id"])
+	assert.Equal(t, "test", req.r.Metadata["Dapr-Reentrant-Id"].Values[0])
 }

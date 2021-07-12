@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -17,24 +17,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/dapr/components-contrib/bindings"
-	"github.com/dapr/components-contrib/middleware"
-	"github.com/dapr/components-contrib/pubsub"
-	"github.com/dapr/components-contrib/secretstores"
-	"github.com/dapr/components-contrib/state"
-	"github.com/dapr/dapr/pkg/actors"
-	components_v1alpha1 "github.com/dapr/dapr/pkg/apis/components/v1alpha1"
-	"github.com/dapr/dapr/pkg/channel/http"
-	http_middleware_loader "github.com/dapr/dapr/pkg/components/middleware/http"
-	"github.com/dapr/dapr/pkg/config"
-	diag "github.com/dapr/dapr/pkg/diagnostics"
-	"github.com/dapr/dapr/pkg/logger"
-	invokev1 "github.com/dapr/dapr/pkg/messaging/v1"
-	http_middleware "github.com/dapr/dapr/pkg/middleware/http"
-	runtime_pubsub "github.com/dapr/dapr/pkg/runtime/pubsub"
-	daprt "github.com/dapr/dapr/pkg/testing"
-	testtrace "github.com/dapr/dapr/pkg/testing/trace"
+	"github.com/agrea/ptr"
 	routing "github.com/fasthttp/router"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/pkg/errors"
@@ -42,10 +27,31 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/fasthttputil"
+	epb "google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/anypb"
 	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/dapr/components-contrib/bindings"
+	"github.com/dapr/components-contrib/middleware"
+	"github.com/dapr/components-contrib/pubsub"
+	"github.com/dapr/components-contrib/secretstores"
+	"github.com/dapr/components-contrib/state"
+	"github.com/dapr/kit/logger"
+
+	"github.com/dapr/dapr/pkg/actors"
+	components_v1alpha1 "github.com/dapr/dapr/pkg/apis/components/v1alpha1"
+	"github.com/dapr/dapr/pkg/channel/http"
+	http_middleware_loader "github.com/dapr/dapr/pkg/components/middleware/http"
+	"github.com/dapr/dapr/pkg/config"
+	diag "github.com/dapr/dapr/pkg/diagnostics"
+	invokev1 "github.com/dapr/dapr/pkg/messaging/v1"
+	http_middleware "github.com/dapr/dapr/pkg/middleware/http"
+	runtime_pubsub "github.com/dapr/dapr/pkg/runtime/pubsub"
+	daprt "github.com/dapr/dapr/pkg/testing"
+	testtrace "github.com/dapr/dapr/pkg/testing/trace"
 )
 
 var invalidJSON = []byte{0x7b, 0x7b}
@@ -53,20 +59,25 @@ var invalidJSON = []byte{0x7b, 0x7b}
 func TestPubSubEndpoints(t *testing.T) {
 	fakeServer := newFakeHTTPServer()
 	testAPI := &api{
-		publishFn: func(req *pubsub.PublishRequest) error {
-			if req.PubsubName == "errorpubsub" {
-				return fmt.Errorf("Error from pubsub %s", req.PubsubName)
-			}
+		pubsubAdapter: &daprt.MockPubSubAdapter{
+			PublishFn: func(req *pubsub.PublishRequest) error {
+				if req.PubsubName == "errorpubsub" {
+					return fmt.Errorf("Error from pubsub %s", req.PubsubName)
+				}
 
-			if req.PubsubName == "errnotfound" {
-				return runtime_pubsub.NotFoundError{PubsubName: "errnotfound"}
-			}
+				if req.PubsubName == "errnotfound" {
+					return runtime_pubsub.NotFoundError{PubsubName: "errnotfound"}
+				}
 
-			if req.PubsubName == "errnotallowed" {
-				return runtime_pubsub.NotAllowedError{Topic: req.Topic, ID: "test"}
-			}
+				if req.PubsubName == "errnotallowed" {
+					return runtime_pubsub.NotAllowedError{Topic: req.Topic, ID: "test"}
+				}
 
-			return nil
+				return nil
+			},
+			GetPubSubFn: func(pubsubName string) pubsub.PubSub {
+				return &daprt.MockPubSub{}
+			},
 		},
 		json: jsoniter.ConfigFastest,
 	}
@@ -130,14 +141,14 @@ func TestPubSubEndpoints(t *testing.T) {
 		}
 	})
 
-	t.Run("Publish without topic name ending in // - 404", func(t *testing.T) {
+	t.Run("Publish with topic name '/' - 204", func(t *testing.T) {
 		apiPath := fmt.Sprintf("%s/publish/pubsubname//", apiVersionV1)
 		testMethods := []string{"POST", "PUT"}
 		for _, method := range testMethods {
 			// act
 			resp := fakeServer.DoRequest(method, apiPath, []byte("{\"key\": \"value\"}"), nil)
 			// assert
-			assert.Equal(t, 404, resp.StatusCode, "unexpected success publishing with %s", method)
+			assert.Equal(t, 204, resp.StatusCode, "success publishing with %s", method)
 		}
 	})
 
@@ -166,16 +177,16 @@ func TestPubSubEndpoints(t *testing.T) {
 	t.Run("Pubsub not configured - 400", func(t *testing.T) {
 		apiPath := fmt.Sprintf("%s/publish/pubsubname/topic", apiVersionV1)
 		testMethods := []string{"POST", "PUT"}
-		savePublishFn := testAPI.publishFn
-		testAPI.publishFn = nil
+		savePubSubAdapter := testAPI.pubsubAdapter
+		testAPI.pubsubAdapter = nil
 		for _, method := range testMethods {
 			// act
 			resp := fakeServer.DoRequest(method, apiPath, []byte("{\"key\": \"value\"}"), nil)
 			// assert
 			assert.Equal(t, 400, resp.StatusCode, "unexpected success publishing with %s", method)
-			assert.Equal(t, "ERR_PUBSUB_NOT_FOUND", resp.ErrorBody["errorCode"])
+			assert.Equal(t, "ERR_PUBSUB_NOT_CONFIGURED", resp.ErrorBody["errorCode"])
 		}
-		testAPI.publishFn = savePublishFn
+		testAPI.pubsubAdapter = savePubSubAdapter
 	})
 
 	t.Run("Pubsub not configured - 400", func(t *testing.T) {
@@ -202,6 +213,43 @@ func TestPubSubEndpoints(t *testing.T) {
 			assert.Equal(t, "ERR_PUBSUB_FORBIDDEN", resp.ErrorBody["errorCode"])
 			assert.Equal(t, "topic topic is not allowed for app id test", resp.ErrorBody["message"])
 		}
+	})
+
+	fakeServer.Shutdown()
+}
+
+func TestShutdownEndpoints(t *testing.T) {
+	fakeServer := newFakeHTTPServer()
+
+	m := mock.Mock{}
+	m.On("shutdown", mock.Anything).Return()
+	testAPI := &api{
+		json: jsoniter.ConfigFastest,
+		shutdown: func() {
+			m.MethodCalled("shutdown")
+		},
+	}
+
+	fakeServer.StartServer(testAPI.constructShutdownEndpoints())
+
+	t.Run("Shutdown successfully - 204", func(t *testing.T) {
+		apiPath := fmt.Sprintf("%s/shutdown", apiVersionV1)
+		resp := fakeServer.DoRequest("GET", apiPath, nil, nil)
+		assert.Equal(t, 204, resp.StatusCode, "success shutdown")
+		for i := 0; i < 5 && len(m.Calls) == 0; i++ {
+			<-time.After(200 * time.Millisecond)
+		}
+		m.AssertCalled(t, "shutdown")
+	})
+
+	t.Run("Shutdown supports POST - 204", func(t *testing.T) {
+		apiPath := fmt.Sprintf("%s/shutdown", apiVersionV1)
+		resp := fakeServer.DoRequest("POST", apiPath, nil, nil)
+		assert.Equal(t, 204, resp.StatusCode, "success shutdown")
+		for i := 0; i < 5 && len(m.Calls) == 0; i++ {
+			<-time.After(200 * time.Millisecond)
+		}
+		m.AssertCalled(t, "shutdown")
 	})
 
 	fakeServer.Shutdown()
@@ -429,6 +477,75 @@ func TestV1DirectMessagingEndpoints(t *testing.T) {
 		mockDirectMessaging.AssertNumberOfCalls(t, "Invoke", 1)
 		assert.Equal(t, 200, resp.StatusCode)
 		assert.Equal(t, []byte("fakeDirectMessageResponse"), resp.RawBody)
+	})
+
+	t.Run("Invoke direct messaging with InvalidArgument Response - 400 Bad request", func(t *testing.T) {
+		d := &epb.ErrorInfo{
+			Reason: "fakeReason",
+		}
+		details, _ := anypb.New(d)
+
+		fakeInternalErrorResponse := invokev1.NewInvokeMethodResponse(
+			int32(codes.InvalidArgument),
+			"InvalidArgument",
+			[]*anypb.Any{details})
+		apiPath := "v1.0/invoke/fakeAppID/method/fakeMethod"
+		fakeData := []byte("fakeData")
+
+		fakeReq := invokev1.NewInvokeMethodRequest("fakeMethod")
+		fakeReq.WithHTTPExtension(gohttp.MethodPost, "")
+		fakeReq.WithRawData(fakeData, "application/json")
+		fakeReq.WithMetadata(headerMetadata)
+
+		mockDirectMessaging.Calls = nil // reset call count
+
+		mockDirectMessaging.On(
+			"Invoke",
+			mock.AnythingOfType("*fasthttp.RequestCtx"),
+			"fakeAppID",
+			mock.AnythingOfType("*v1.InvokeMethodRequest")).Return(fakeInternalErrorResponse, nil).Once()
+
+		// act
+		resp := fakeServer.DoRequest("POST", apiPath, fakeData, nil)
+
+		// assert
+		mockDirectMessaging.AssertNumberOfCalls(t, "Invoke", 1)
+		assert.Equal(t, 400, resp.StatusCode)
+
+		// protojson produces different indentation space based on OS
+		// For linux
+		comp1 := string(resp.RawBody) == "{\"code\":3,\"message\":\"InvalidArgument\",\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.ErrorInfo\",\"reason\":\"fakeReason\"}]}"
+		// For mac and windows
+		comp2 := string(resp.RawBody) == "{\"code\":3, \"message\":\"InvalidArgument\", \"details\":[{\"@type\":\"type.googleapis.com/google.rpc.ErrorInfo\", \"reason\":\"fakeReason\"}]}"
+		assert.True(t, comp1 || comp2)
+	})
+
+	t.Run("Invoke direct messaging with malformed status response", func(t *testing.T) {
+		malformedDetails := &anypb.Any{TypeUrl: "malformed"}
+		fakeInternalErrorResponse := invokev1.NewInvokeMethodResponse(int32(codes.Internal), "InternalError", []*anypb.Any{malformedDetails})
+		apiPath := "v1.0/invoke/fakeAppID/method/fakeMethod"
+		fakeData := []byte("fakeData")
+
+		fakeReq := invokev1.NewInvokeMethodRequest("fakeMethod")
+		fakeReq.WithHTTPExtension(gohttp.MethodPost, "")
+		fakeReq.WithRawData(fakeData, "application/json")
+		fakeReq.WithMetadata(headerMetadata)
+
+		mockDirectMessaging.Calls = nil // reset call count
+
+		mockDirectMessaging.On(
+			"Invoke",
+			mock.AnythingOfType("*fasthttp.RequestCtx"),
+			"fakeAppID",
+			mock.AnythingOfType("*v1.InvokeMethodRequest")).Return(fakeInternalErrorResponse, nil).Once()
+
+		// act
+		resp := fakeServer.DoRequest("POST", apiPath, fakeData, nil)
+
+		// assert
+		mockDirectMessaging.AssertNumberOfCalls(t, "Invoke", 1)
+		assert.Equal(t, 500, resp.StatusCode)
+		assert.True(t, strings.HasPrefix(string(resp.RawBody), "{\"errorCode\":\"ERR_MALFORMED_RESPONSE\",\"message\":\""))
 	})
 
 	t.Run("Invoke direct messaging with querystring - 200 OK", func(t *testing.T) {
@@ -1305,41 +1422,43 @@ func TestV1MetadataEndpoint(t *testing.T) {
 
 	testAPI := &api{
 		actor: nil,
-		components: []components_v1alpha1.Component{
-			{
-				ObjectMeta: meta_v1.ObjectMeta{
-					Name: "MockComponent1Name",
-				},
-				Spec: components_v1alpha1.ComponentSpec{
-					Type:    "mock.component1Type",
-					Version: "v1.0",
-					Metadata: []components_v1alpha1.MetadataItem{
-						{
-							Name: "actorMockComponent1",
-							Value: components_v1alpha1.DynamicValue{
-								JSON: v1.JSON{Raw: []byte("true")},
+		getComponentsFn: func() []components_v1alpha1.Component {
+			return []components_v1alpha1.Component{
+				{
+					ObjectMeta: meta_v1.ObjectMeta{
+						Name: "MockComponent1Name",
+					},
+					Spec: components_v1alpha1.ComponentSpec{
+						Type:    "mock.component1Type",
+						Version: "v1.0",
+						Metadata: []components_v1alpha1.MetadataItem{
+							{
+								Name: "actorMockComponent1",
+								Value: components_v1alpha1.DynamicValue{
+									JSON: v1.JSON{Raw: []byte("true")},
+								},
 							},
 						},
 					},
 				},
-			},
-			{
-				ObjectMeta: meta_v1.ObjectMeta{
-					Name: "MockComponent2Name",
-				},
-				Spec: components_v1alpha1.ComponentSpec{
-					Type:    "mock.component2Type",
-					Version: "v1.0",
-					Metadata: []components_v1alpha1.MetadataItem{
-						{
-							Name: "actorMockComponent2",
-							Value: components_v1alpha1.DynamicValue{
-								JSON: v1.JSON{Raw: []byte("true")},
+				{
+					ObjectMeta: meta_v1.ObjectMeta{
+						Name: "MockComponent2Name",
+					},
+					Spec: components_v1alpha1.ComponentSpec{
+						Type:    "mock.component2Type",
+						Version: "v1.0",
+						Metadata: []components_v1alpha1.MetadataItem{
+							{
+								Name: "actorMockComponent2",
+								Value: components_v1alpha1.DynamicValue{
+									JSON: v1.JSON{Raw: []byte("true")},
+								},
 							},
 						},
 					},
 				},
-			},
+			}
 		},
 		json: jsoniter.ConfigFastest,
 	}
@@ -1705,7 +1824,7 @@ func buildHTTPPineline(spec config.PipelineSpec) http_middleware.Pipeline {
 	}))
 	var handlers []http_middleware.Middleware
 	for i := 0; i < len(spec.Handlers); i++ {
-		handler, err := registry.Create(spec.Handlers[i].Type, middleware.Metadata{})
+		handler, err := registry.Create(spec.Handlers[i].Type, spec.Handlers[i].Version, middleware.Metadata{})
 		if err != nil {
 			return http_middleware.Pipeline{}
 		}
@@ -1847,7 +1966,7 @@ func TestSinglePipelineWithNoTracing(t *testing.T) {
 	})
 }
 
-// Fake http server and client helpers to simplify endpoints test
+// Fake http server and client helpers to simplify endpoints test.
 func newFakeHTTPServer() *fakeHTTPServer {
 	return &fakeHTTPServer{}
 }
@@ -2016,13 +2135,17 @@ func (f *fakeHTTPServer) DoRequest(method, path string, body []byte, params map[
 func TestV1StateEndpoints(t *testing.T) {
 	etag := "`~!@#$%^&*()_+-={}[]|\\:\";'<>?,./'"
 	fakeServer := newFakeHTTPServer()
-	fakeStore := fakeStateStore{}
+	var fakeStore state.Store = fakeStateStore{}
 	fakeStores := map[string]state.Store{
 		"store1": fakeStore,
 	}
+	fakeTransactionalStores := map[string]state.TransactionalStore{
+		"store1": fakeStore.(state.TransactionalStore),
+	}
 	testAPI := &api{
-		stateStores: fakeStores,
-		json:        jsoniter.ConfigFastest,
+		stateStores:              fakeStores,
+		transactionalStateStores: fakeTransactionalStores,
+		json:                     jsoniter.ConfigFastest,
 	}
 	fakeServer.StartServer(testAPI.constructStateEndpoints())
 	storeName := "store1"
@@ -2105,8 +2228,7 @@ func TestV1StateEndpoints(t *testing.T) {
 	t.Run("Update state - PUT verb supported", func(t *testing.T) {
 		apiPath := fmt.Sprintf("v1.0/state/%s", storeName)
 		request := []state.SetRequest{{
-			Key:  "good-key",
-			ETag: "",
+			Key: "good-key",
 		}}
 		b, _ := json.Marshal(request)
 		// act
@@ -2119,8 +2241,7 @@ func TestV1StateEndpoints(t *testing.T) {
 	t.Run("Update state - No ETag", func(t *testing.T) {
 		apiPath := fmt.Sprintf("v1.0/state/%s", storeName)
 		request := []state.SetRequest{{
-			Key:  "good-key",
-			ETag: "",
+			Key: "good-key",
 		}}
 		b, _ := json.Marshal(request)
 		// act
@@ -2131,10 +2252,11 @@ func TestV1StateEndpoints(t *testing.T) {
 	})
 
 	t.Run("Update state - State Error", func(t *testing.T) {
+		empty := ""
 		apiPath := fmt.Sprintf("v1.0/state/%s", storeName)
 		request := []state.SetRequest{{
 			Key:  "error-key",
-			ETag: "",
+			ETag: &empty,
 		}}
 		b, _ := json.Marshal(request)
 		// act
@@ -2148,7 +2270,7 @@ func TestV1StateEndpoints(t *testing.T) {
 		apiPath := fmt.Sprintf("v1.0/state/%s", storeName)
 		request := []state.SetRequest{{
 			Key:  "good-key",
-			ETag: etag,
+			ETag: &etag,
 		}}
 		b, _ := json.Marshal(request)
 		// act
@@ -2159,10 +2281,11 @@ func TestV1StateEndpoints(t *testing.T) {
 	})
 
 	t.Run("Update state - Wrong ETag", func(t *testing.T) {
+		invalidEtag := "BAD ETAG"
 		apiPath := fmt.Sprintf("v1.0/state/%s", storeName)
 		request := []state.SetRequest{{
 			Key:  "good-key",
-			ETag: "BAD ETAG",
+			ETag: &invalidEtag,
 		}}
 		b, _ := json.Marshal(request)
 		// act
@@ -2239,13 +2362,13 @@ func TestV1StateEndpoints(t *testing.T) {
 			{
 				Key:   "good-key",
 				Data:  jsoniter.RawMessage("life is good"),
-				ETag:  "`~!@#$%^&*()_+-={}[]|\\:\";'<>?,./'",
+				ETag:  ptr.String("`~!@#$%^&*()_+-={}[]|\\:\";'<>?,./'"),
 				Error: "",
 			},
 			{
 				Key:   "foo",
 				Data:  nil,
-				ETag:  "",
+				ETag:  nil,
 				Error: "",
 			},
 		}
@@ -2272,13 +2395,13 @@ func TestV1StateEndpoints(t *testing.T) {
 			{
 				Key:   "good-key",
 				Data:  jsoniter.RawMessage("life is good"),
-				ETag:  "`~!@#$%^&*()_+-={}[]|\\:\";'<>?,./'",
+				ETag:  ptr.String("`~!@#$%^&*()_+-={}[]|\\:\";'<>?,./'"),
 				Error: "",
 			},
 			{
 				Key:   "error-key",
 				Data:  nil,
-				ETag:  "",
+				ETag:  nil,
 				Error: "UPSTREAM STATE ERROR",
 			},
 		}
@@ -2289,6 +2412,10 @@ func TestV1StateEndpoints(t *testing.T) {
 
 type fakeStateStore struct {
 	counter int
+}
+
+func (c fakeStateStore) Ping() error {
+	return nil
 }
 
 func (c fakeStateStore) BulkDelete(req []state.DeleteRequest) error {
@@ -2317,7 +2444,7 @@ func (c fakeStateStore) BulkSet(req []state.SetRequest) error {
 
 func (c fakeStateStore) Delete(req *state.DeleteRequest) error {
 	if req.Key == "good-key" {
-		if req.ETag != "" && req.ETag != "`~!@#$%^&*()_+-={}[]|\\:\";'<>?,./'" {
+		if req.ETag != nil && *req.ETag != "`~!@#$%^&*()_+-={}[]|\\:\";'<>?,./'" {
 			return errors.New("ETag mismatch")
 		}
 		return nil
@@ -2329,7 +2456,7 @@ func (c fakeStateStore) Get(req *state.GetRequest) (*state.GetResponse, error) {
 	if req.Key == "good-key" {
 		return &state.GetResponse{
 			Data: []byte("\"bGlmZSBpcyBnb29k\""),
-			ETag: "`~!@#$%^&*()_+-={}[]|\\:\";'<>?,./'",
+			ETag: ptr.String("`~!@#$%^&*()_+-={}[]|\\:\";'<>?,./'"),
 		}, nil
 	}
 	if req.Key == "error-key" {
@@ -2338,7 +2465,7 @@ func (c fakeStateStore) Get(req *state.GetRequest) (*state.GetResponse, error) {
 	return nil, nil
 }
 
-// BulkGet performs a bulks get operations
+// BulkGet performs a bulks get operations.
 func (c fakeStateStore) BulkGet(req []state.GetRequest) (bool, []state.BulkGetResponse, error) {
 	return false, nil, nil
 }
@@ -2348,9 +2475,16 @@ func (c fakeStateStore) Init(metadata state.Metadata) error {
 	return nil
 }
 
+func (c fakeStateStore) Features() []state.Feature {
+	return []state.Feature{
+		state.FeatureETag,
+		state.FeatureTransactional,
+	}
+}
+
 func (c fakeStateStore) Set(req *state.SetRequest) error {
 	if req.Key == "good-key" {
-		if req.ETag != "" && req.ETag != "`~!@#$%^&*()_+-={}[]|\\:\";'<>?,./'" {
+		if req.ETag != nil && *req.ETag != "`~!@#$%^&*()_+-={}[]|\\:\";'<>?,./'" {
 			return errors.New("ETag mismatch")
 		}
 		return nil
@@ -2534,15 +2668,19 @@ func TestV1HealthzEndpoint(t *testing.T) {
 
 func TestV1TransactionEndpoints(t *testing.T) {
 	fakeServer := newFakeHTTPServer()
-	fakeStore := fakeStateStore{}
+	var fakeStore state.Store = fakeStateStore{}
 	fakeStoreNonTransactional := new(daprt.MockStateStore)
 	fakeStores := map[string]state.Store{
 		"store1":                fakeStore,
 		"storeNonTransactional": fakeStoreNonTransactional,
 	}
+	fakeTransactionalStores := map[string]state.TransactionalStore{
+		"store1": fakeStore.(state.TransactionalStore),
+	}
 	testAPI := &api{
-		stateStores: fakeStores,
-		json:        jsoniter.ConfigFastest,
+		stateStores:              fakeStores,
+		transactionalStateStores: fakeTransactionalStores,
+		json:                     jsoniter.ConfigFastest,
 	}
 	fakeServer.StartServer(testAPI.constructStateEndpoints())
 	fakeBodyObject := map[string]interface{}{"data": "fakeData"}
@@ -2720,4 +2858,90 @@ func TestV1TransactionEndpoints(t *testing.T) {
 		assert.Equal(t, "ERR_STATE_TRANSACTION", resp.ErrorBody["errorCode"], apiPath)
 	})
 	fakeServer.Shutdown()
+}
+
+func TestStateStoreErrors(t *testing.T) {
+	t.Run("non etag error", func(t *testing.T) {
+		a := &api{}
+		err := errors.New("error")
+		c, m, r := a.stateErrorResponse(err, "ERR_STATE_SAVE")
+
+		assert.Equal(t, 500, c)
+		assert.Equal(t, "error", m)
+		assert.Equal(t, "ERR_STATE_SAVE", r.ErrorCode)
+	})
+
+	t.Run("etag mismatch error", func(t *testing.T) {
+		a := &api{}
+		err := state.NewETagError(state.ETagMismatch, errors.New("error"))
+		c, m, r := a.stateErrorResponse(err, "ERR_STATE_SAVE")
+
+		assert.Equal(t, 409, c)
+		assert.Equal(t, "possible etag mismatch. error from state store: error", m)
+		assert.Equal(t, "ERR_STATE_SAVE", r.ErrorCode)
+	})
+
+	t.Run("etag invalid error", func(t *testing.T) {
+		a := &api{}
+		err := state.NewETagError(state.ETagInvalid, errors.New("error"))
+		c, m, r := a.stateErrorResponse(err, "ERR_STATE_SAVE")
+
+		assert.Equal(t, 400, c)
+		assert.Equal(t, "invalid etag value: error", m)
+		assert.Equal(t, "ERR_STATE_SAVE", r.ErrorCode)
+	})
+
+	t.Run("etag error mismatch", func(t *testing.T) {
+		a := &api{}
+		err := state.NewETagError(state.ETagMismatch, errors.New("error"))
+		e, c, m := a.etagError(err)
+
+		assert.Equal(t, true, e)
+		assert.Equal(t, 409, c)
+		assert.Equal(t, "possible etag mismatch. error from state store: error", m)
+	})
+
+	t.Run("etag error invalid", func(t *testing.T) {
+		a := &api{}
+		err := state.NewETagError(state.ETagInvalid, errors.New("error"))
+		e, c, m := a.etagError(err)
+
+		assert.Equal(t, true, e)
+		assert.Equal(t, 400, c)
+		assert.Equal(t, "invalid etag value: error", m)
+	})
+}
+
+func TestExtractEtag(t *testing.T) {
+	t.Run("no etag present", func(t *testing.T) {
+		r := fasthttp.RequestCtx{
+			Request: fasthttp.Request{},
+		}
+
+		ok, etag := extractEtag(&r)
+		assert.False(t, ok)
+		assert.Empty(t, etag)
+	})
+
+	t.Run("empty etag exists", func(t *testing.T) {
+		r := fasthttp.RequestCtx{
+			Request: fasthttp.Request{},
+		}
+		r.Request.Header.Add("If-Match", "")
+
+		ok, etag := extractEtag(&r)
+		assert.True(t, ok)
+		assert.Empty(t, etag)
+	})
+
+	t.Run("non-empty etag exists", func(t *testing.T) {
+		r := fasthttp.RequestCtx{
+			Request: fasthttp.Request{},
+		}
+		r.Request.Header.Add("If-Match", "a")
+
+		ok, etag := extractEtag(&r)
+		assert.True(t, ok)
+		assert.Equal(t, "a", etag)
+	})
 }

@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -11,8 +11,7 @@ import (
 	"github.com/dapr/components-contrib/secretstores"
 )
 
-type FakeSecretStore struct {
-}
+type FakeSecretStore struct{}
 
 func (c FakeSecretStore) GetSecret(req secretstores.GetSecretRequest) (secretstores.GetSecretResponse, error) {
 	if req.Name == "good-key" {
@@ -28,12 +27,19 @@ func (c FakeSecretStore) GetSecret(req secretstores.GetSecretRequest) (secretsto
 	return secretstores.GetSecretResponse{}, nil
 }
 
-func (c FakeSecretStore) BulkGetSecret(req secretstores.BulkGetSecretRequest) (secretstores.GetSecretResponse, error) {
-	return secretstores.GetSecretResponse{
-		Data: map[string]string{"good-key": "life is good"},
+func (c FakeSecretStore) BulkGetSecret(req secretstores.BulkGetSecretRequest) (secretstores.BulkGetSecretResponse, error) {
+	response := map[string]map[string]string{}
+	response["good-key"] = map[string]string{"good-key": "life is good"}
+
+	return secretstores.BulkGetSecretResponse{
+		Data: response,
 	}, nil
 }
 
 func (c FakeSecretStore) Init(metadata secretstores.Metadata) error {
+	return nil
+}
+
+func (c FakeSecretStore) Close() error {
 	return nil
 }

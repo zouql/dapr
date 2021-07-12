@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -13,15 +13,15 @@ import (
 	kube "github.com/dapr/dapr/tests/platforms/kubernetes"
 )
 
-// runnerFailExitCode is the exit code when test runner setup is failed
+// runnerFailExitCode is the exit code when test runner setup is failed.
 const runnerFailExitCode = 1
 
-// runnable is an interface to implement testing.M
+// runnable is an interface to implement testing.M.
 type runnable interface {
 	Run() int
 }
 
-// PlatformInterface defines the testing platform for test runner
+// PlatformInterface defines the testing platform for test runner.
 type PlatformInterface interface {
 	setup() error
 	tearDown() error
@@ -30,7 +30,6 @@ type PlatformInterface interface {
 
 	AcquireAppExternalURL(name string) string
 	GetAppHostDetails(name string) (string, string, error)
-	GetServiceDNSName(name string) (string, error)
 	Restart(name string) error
 	Scale(name string, replicas int32) error
 	PortForwardToApp(appName string, targetPort ...int) ([]int, error)
@@ -46,7 +45,7 @@ type AppUsage struct {
 }
 
 // TestRunner holds initial test apps and testing platform instance
-// maintains apps and platform for e2e test
+// maintains apps and platform for e2e test.
 type TestRunner struct {
 	// id is test runner id which will be used for logging
 	id string
@@ -63,7 +62,7 @@ type TestRunner struct {
 	Platform PlatformInterface
 }
 
-// NewTestRunner returns TestRunner instance for e2e test
+// NewTestRunner returns TestRunner instance for e2e test.
 func NewTestRunner(id string, apps []kube.AppDescription,
 	comps []kube.ComponentDescription,
 	initApps []kube.AppDescription) *TestRunner {
@@ -76,31 +75,7 @@ func NewTestRunner(id string, apps []kube.AppDescription,
 	}
 }
 
-// StartNonLocalDaprDisabledApps is the entry point to start non-local dapr disabled apps.
-// the apps do not have any components.
-// tearDown needs to be called manually after the test runner is started using this method.
-func (tr *TestRunner) StartNonLocalDaprDisabledApps() int {
-	// Setup non-local apps
-	log.Println("Running non-local app setup...")
-	err := tr.Platform.setup()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed Platform.setup(), %s", err.Error())
-		return runnerFailExitCode
-	}
-
-	// Install non-local apps.
-	if tr.testApps != nil && len(tr.testApps) > 0 {
-		log.Println("Installing non-local dapr disabled apps...")
-		if err := tr.Platform.addApps(tr.testApps); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed Platform.addApps(), %s", err.Error())
-			return runnerFailExitCode
-		}
-	}
-
-	return 0
-}
-
-// Start is the entry point of Dapr test runner
+// Start is the entry point of Dapr test runner.
 func (tr *TestRunner) Start(m runnable) int {
 	// TODO: Add logging and reporting initialization
 
@@ -109,7 +84,7 @@ func (tr *TestRunner) Start(m runnable) int {
 	err := tr.Platform.setup()
 	defer func() {
 		log.Println("Running teardown...")
-		tr.TearDown()
+		tr.tearDown()
 	}()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed Platform.setup(), %s", err.Error())
@@ -150,8 +125,7 @@ func (tr *TestRunner) Start(m runnable) int {
 	return m.Run()
 }
 
-// TearDown tears down the platform setup.
-func (tr *TestRunner) TearDown() {
+func (tr *TestRunner) tearDown() {
 	// Tearing down platform
 	tr.Platform.tearDown()
 

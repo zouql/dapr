@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -9,12 +9,13 @@ import (
 	"net/http"
 	"testing"
 
-	commonv1pb "github.com/dapr/dapr/pkg/proto/common/v1"
-	internalv1pb "github.com/dapr/dapr/pkg/proto/internals/v1"
-	"github.com/golang/protobuf/ptypes/any"
 	"github.com/stretchr/testify/assert"
 	"github.com/valyala/fasthttp"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/protobuf/types/known/anypb"
+
+	commonv1pb "github.com/dapr/dapr/pkg/proto/common/v1"
+	internalv1pb "github.com/dapr/dapr/pkg/proto/internals/v1"
 )
 
 func TestInvocationResponse(t *testing.T) {
@@ -28,7 +29,7 @@ func TestInvocationResponse(t *testing.T) {
 func TestInternalInvocationResponse(t *testing.T) {
 	t.Run("valid internal invoke response", func(t *testing.T) {
 		m := &commonv1pb.InvokeResponse{
-			Data:        &any.Any{Value: []byte("response")},
+			Data:        &anypb.Any{Value: []byte("response")},
 			ContentType: "application/json",
 		}
 		pb := internalv1pb.InternalInvokeResponse{
@@ -73,11 +74,15 @@ func TestResponseData(t *testing.T) {
 	})
 
 	t.Run("typeurl is set but content_type is unset", func(t *testing.T) {
+		s := &commonv1pb.StateItem{Key: "custom_key"}
+		b, err := anypb.New(s)
+		assert.NoError(t, err)
+
 		resp := NewInvokeMethodResponse(0, "OK", nil)
-		resp.r.Message.Data = &any.Any{TypeUrl: "fake", Value: []byte("fake")}
+		resp.r.Message.Data = b
 		contentType, bData := resp.RawData()
-		assert.Equal(t, "", contentType)
-		assert.Equal(t, []byte("fake"), bData)
+		assert.Equal(t, ProtobufContentType, contentType)
+		assert.Equal(t, b.Value, bData)
 	})
 }
 
@@ -98,7 +103,7 @@ func TestResponseHeader(t *testing.T) {
 	})
 
 	t.Run("HTTP headers", func(t *testing.T) {
-		var resp = fasthttp.AcquireResponse()
+		resp := fasthttp.AcquireResponse()
 		resp.Header.Set("Header1", "Value1")
 		resp.Header.Set("Header2", "Value2")
 		resp.Header.Set("Header3", "Value3")

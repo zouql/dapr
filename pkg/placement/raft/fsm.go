@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -10,22 +10,23 @@ import (
 	"strconv"
 	"sync"
 
-	v1pb "github.com/dapr/dapr/pkg/proto/placement/v1"
 	"github.com/hashicorp/go-msgpack/codec"
 	"github.com/hashicorp/raft"
 	"github.com/pkg/errors"
+
+	v1pb "github.com/dapr/dapr/pkg/proto/placement/v1"
 )
 
-// CommandType is the type of raft command in log entry
+// CommandType is the type of raft command in log entry.
 type CommandType uint8
 
 const (
-	// MemberUpsert is the command to update or insert new or existing member info
+	// MemberUpsert is the command to update or insert new or existing member info.
 	MemberUpsert CommandType = 0
-	// MemberRemove is the command to remove member from actor host member state
+	// MemberRemove is the command to remove member from actor host member state.
 	MemberRemove CommandType = 1
 
-	// TableDisseminate is the reserved command for dissemination loop
+	// TableDisseminate is the reserved command for dissemination loop.
 	TableDisseminate CommandType = 100
 )
 
@@ -47,7 +48,7 @@ func newFSM() *FSM {
 	}
 }
 
-// State is used to return a handle to the current state
+// State is used to return a handle to the current state.
 func (c *FSM) State() *DaprHostMemberState {
 	c.stateLock.RLock()
 	defer c.stateLock.RUnlock()
@@ -131,27 +132,29 @@ func (c *FSM) removeMember(cmdData []byte) (bool, error) {
 
 // Apply log is invoked once a log entry is committed.
 func (c *FSM) Apply(log *raft.Log) interface{} {
-	buf := log.Data
-	cmdType := CommandType(buf[0])
+	var (
+		err     error
+		updated bool
+	)
 
 	if log.Index < c.state.Index {
 		logging.Warnf("old: %d, new index: %d. skip apply", c.state.Index, log.Index)
-		return nil
+		return false
 	}
 
-	var err error
-	var updated bool
-	switch cmdType {
+	switch CommandType(log.Data[0]) {
 	case MemberUpsert:
-		updated, err = c.upsertMember(buf[1:])
+		updated, err = c.upsertMember(log.Data[1:])
 	case MemberRemove:
-		updated, err = c.removeMember(buf[1:])
+		updated, err = c.removeMember(log.Data[1:])
 	default:
 		err = errors.New("unimplemented command")
 	}
 
 	if err != nil {
-		return err
+		logging.Errorf("fsm apply entry log failed. data: %s, error: %s",
+			string(log.Data), err.Error())
+		return false
 	}
 
 	return updated

@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -9,9 +9,10 @@ import (
 	"fmt"
 	"testing"
 
-	kube "github.com/dapr/dapr/tests/platforms/kubernetes"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
+	kube "github.com/dapr/dapr/tests/platforms/kubernetes"
 )
 
 type fakeTestingM struct{}
@@ -20,7 +21,7 @@ func (f *fakeTestingM) Run() int {
 	return 0
 }
 
-// MockPlatform is the mock of Disposable interface
+// MockPlatform is the mock of Disposable interface.
 type MockPlatform struct {
 	mock.Mock
 }
@@ -85,46 +86,6 @@ func (m *MockPlatform) GetTotalRestarts(appName string) (int, error) {
 	return 0, args.Error(0)
 }
 
-func (m *MockPlatform) GetServiceDNSName(appName string) (string, error) {
-	args := m.Called(appName)
-	return appName + ".local", args.Error(0)
-}
-
-func TestStartNonLocalDaprDisabledApps(t *testing.T) {
-	fakeApps := []kube.AppDescription{
-		{
-			AppName:        "fakeapp",
-			DaprEnabled:    false,
-			ImageName:      "fakeapp",
-			RegistryName:   "fakeregistry",
-			Replicas:       1,
-			IngressEnabled: false,
-		},
-	}
-
-	t.Run("Run Runner successfully", func(t *testing.T) {
-		mockPlatform := new(MockPlatform)
-		mockPlatform.On("tearDown").Return(nil)
-		mockPlatform.On("setup").Return(nil)
-		mockPlatform.On("addApps", fakeApps).Return(nil)
-
-		fakeRunner := &TestRunner{
-			id:       "fakeRunner",
-			testApps: fakeApps,
-			Platform: mockPlatform,
-		}
-
-		ret := fakeRunner.StartNonLocalDaprDisabledApps()
-		assert.Equal(t, 0, ret)
-		fakeRunner.TearDown()
-
-		mockPlatform.AssertNumberOfCalls(t, "setup", 1)
-		mockPlatform.AssertNumberOfCalls(t, "tearDown", 1)
-		mockPlatform.AssertNumberOfCalls(t, "addApps", 1)
-		mockPlatform.AssertNumberOfCalls(t, "addComponents", 0)
-	})
-}
-
 func TestStartRunner(t *testing.T) {
 	fakeTestApps := []kube.AppDescription{
 		{
@@ -134,6 +95,7 @@ func TestStartRunner(t *testing.T) {
 			RegistryName:   "fakeregistry",
 			Replicas:       1,
 			IngressEnabled: true,
+			MetricsEnabled: true,
 		},
 		{
 			AppName:        "fakeapp1",
@@ -142,6 +104,7 @@ func TestStartRunner(t *testing.T) {
 			RegistryName:   "fakeregistry",
 			Replicas:       1,
 			IngressEnabled: true,
+			MetricsEnabled: true,
 		},
 	}
 

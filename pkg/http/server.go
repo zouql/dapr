@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -8,25 +8,29 @@ package http
 import (
 	"fmt"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 
 	cors "github.com/AdhityaRamadhanus/fasthttpcors"
+	routing "github.com/fasthttp/router"
+	"github.com/valyala/fasthttp"
+	"github.com/valyala/fasthttp/pprofhandler"
+
 	"github.com/dapr/dapr/pkg/config"
 	cors_dapr "github.com/dapr/dapr/pkg/cors"
-	"github.com/dapr/dapr/pkg/logger"
-
 	diag "github.com/dapr/dapr/pkg/diagnostics"
 	diag_utils "github.com/dapr/dapr/pkg/diagnostics/utils"
 	http_middleware "github.com/dapr/dapr/pkg/middleware/http"
 	auth "github.com/dapr/dapr/pkg/runtime/security"
-	routing "github.com/fasthttp/router"
-	"github.com/valyala/fasthttp"
-	"github.com/valyala/fasthttp/pprofhandler"
+	"github.com/dapr/kit/logger"
 )
 
 var log = logger.NewLogger("dapr.runtime.http")
 
-// Server is an interface for the Dapr HTTP server
+const protocol = "http"
+
+// Server is an interface for the Dapr HTTP server.
 type Server interface {
 	StartNonBlocking()
 }
@@ -37,20 +41,22 @@ type server struct {
 	metricSpec  config.MetricSpec
 	pipeline    http_middleware.Pipeline
 	api         API
+	apiSpec     config.APISpec
 }
 
-// NewServer returns a new HTTP server
-func NewServer(api API, config ServerConfig, tracingSpec config.TracingSpec, metricSpec config.MetricSpec, pipeline http_middleware.Pipeline) Server {
+// NewServer returns a new HTTP server.
+func NewServer(api API, config ServerConfig, tracingSpec config.TracingSpec, metricSpec config.MetricSpec, pipeline http_middleware.Pipeline, apiSpec config.APISpec) Server {
 	return &server{
 		api:         api,
 		config:      config,
 		tracingSpec: tracingSpec,
 		metricSpec:  metricSpec,
 		pipeline:    pipeline,
+		apiSpec:     apiSpec,
 	}
 }
 
-// StartNonBlocking starts a new server in a goroutine
+// StartNonBlocking starts a new server in a goroutine.
 func (s *server) StartNonBlocking() {
 	handler :=
 		useAPIAuthentication(
@@ -61,8 +67,13 @@ func (s *server) StartNonBlocking() {
 	handler = s.useMetrics(handler)
 	handler = s.useTracing(handler)
 
+	customServer := &fasthttp.Server{
+		Handler:            handler,
+		MaxRequestBodySize: s.config.MaxRequestBodySize * 1024 * 1024,
+	}
+
 	go func() {
-		log.Fatal(fasthttp.ListenAndServe(fmt.Sprintf(":%v", s.config.Port), handler))
+		log.Fatal(customServer.ListenAndServe(fmt.Sprintf(":%v", s.config.Port)))
 	}()
 
 	if s.config.EnableProfiling {
@@ -120,6 +131,7 @@ func useAPIAuthentication(next fasthttp.RequestHandler) fasthttp.RequestHandler 
 	return func(ctx *fasthttp.RequestCtx) {
 		v := ctx.Request.Header.Peek(auth.APITokenHeader)
 		if auth.ExcludedRoute(string(ctx.Request.URI().FullURI())) || string(v) == token {
+			ctx.Request.Header.Del(auth.APITokenHeader)
 			next(ctx)
 		} else {
 			ctx.Error("invalid api token", http.StatusUnauthorized)
@@ -134,14 +146,73 @@ func (s *server) getCorsHandler(allowedOrigins []string) *cors.CorsHandler {
 	})
 }
 
-func (s *server) getRouter(endpoints []Endpoint) *routing.Router {
-	router := routing.New()
+func (s *server) unescapeRequestParametersHandler(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		parseError := false
+		unescapeRequestParameters := func(parameter []byte, value interface{}) {
+			switch value.(type) {
+			case string:
+				if !parseError {
+					parameterValue := fmt.Sprintf("%v", value)
+					parameterUnescapedValue, err := url.QueryUnescape(parameterValue)
+					if err == nil {
+						ctx.SetUserValueBytes(parameter, parameterUnescapedValue)
+					} else {
+						parseError = true
+						errorMessage := fmt.Sprintf("Failed to unescape request parameter %s with value %v. Error: %s", parameter, value, err.Error())
+						log.Debug(errorMessage)
+						ctx.Error(errorMessage, fasthttp.StatusBadRequest)
+					}
+				}
+			}
+		}
+		ctx.VisitUserValues(unescapeRequestParameters)
 
-	for _, e := range endpoints {
-		path := fmt.Sprintf("/%s/%s", e.Version, e.Route)
-		for _, m := range e.Methods {
-			router.Handle(m, path, e.Handler)
+		if !parseError {
+			next(ctx)
 		}
 	}
+}
+
+func (s *server) getRouter(endpoints []Endpoint) *routing.Router {
+	router := routing.New()
+	parameterFinder, _ := regexp.Compile("/{.*}")
+	for _, e := range endpoints {
+		if !s.endpointAllowed(e) {
+			continue
+		}
+
+		path := fmt.Sprintf("/%s/%s", e.Version, e.Route)
+		for _, m := range e.Methods {
+			pathIncludesParameters := parameterFinder.MatchString(path)
+			if pathIncludesParameters {
+				router.Handle(m, path, s.unescapeRequestParametersHandler(e.Handler))
+			} else {
+				router.Handle(m, path, e.Handler)
+			}
+		}
+	}
+
 	return router
+}
+
+func (s *server) endpointAllowed(endpoint Endpoint) bool {
+	var httpRules []config.APIAccessRule
+
+	for _, rule := range s.apiSpec.Allowed {
+		if rule.Protocol == protocol {
+			httpRules = append(httpRules, rule)
+		}
+	}
+	if len(httpRules) == 0 {
+		return true
+	}
+
+	for _, rule := range httpRules {
+		if (strings.Index(endpoint.Route, rule.Name) == 0 && endpoint.Version == rule.Version) || endpoint.Route == "healthz" {
+			return true
+		}
+	}
+
+	return false
 }

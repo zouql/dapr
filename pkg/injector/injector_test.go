@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -21,7 +21,7 @@ const (
 )
 
 func TestConfigCorrectValues(t *testing.T) {
-	i := NewInjector("", Config{
+	i := NewInjector(nil, Config{
 		TLSCertFile:            "a",
 		TLSKeyFile:             "b",
 		SidecarImage:           "c",
@@ -104,7 +104,7 @@ func TestGetProtocol(t *testing.T) {
 
 func TestGetAppID(t *testing.T) {
 	t.Run("get app id", func(t *testing.T) {
-		m := map[string]string{daprAppIDKey: "app"}
+		m := map[string]string{appIDKey: "app"}
 		pod := corev1.Pod{}
 		pod.Annotations = m
 		id := getAppID(pod)
@@ -116,23 +116,6 @@ func TestGetAppID(t *testing.T) {
 		pod.ObjectMeta.Name = "pod"
 		id := getAppID(pod)
 		assert.Equal(t, "pod", id)
-	})
-}
-
-func TestGetAppHost(t *testing.T) {
-	t.Run("get app host", func(t *testing.T) {
-		m := map[string]string{daprAppHostKey: "app.host.com"}
-		pod := corev1.Pod{}
-		pod.Annotations = m
-		id := getAppHost(pod)
-		assert.Equal(t, "app.host.com", id)
-	})
-
-	t.Run("get app host empty", func(t *testing.T) {
-		pod := corev1.Pod{}
-		pod.ObjectMeta.Name = "pod"
-		id := getAppHost(pod)
-		assert.Equal(t, "", id)
 	})
 }
 
@@ -172,9 +155,33 @@ func TestMaxConcurrency(t *testing.T) {
 	})
 }
 
-func TestKubernetesDNS(t *testing.T) {
-	dns := getKubernetesDNS("a", "b")
-	assert.Equal(t, "a.b.svc.cluster.local", dns)
+func TestGetServiceAddress(t *testing.T) {
+	testCases := []struct {
+		name          string
+		namespace     string
+		clusterDomain string
+		port          int
+		expect        string
+	}{
+		{
+			port:          80,
+			name:          "a",
+			namespace:     "b",
+			clusterDomain: "cluster.local",
+			expect:        "a.b.svc.cluster.local:80",
+		},
+		{
+			port:          50001,
+			name:          "app",
+			namespace:     "default",
+			clusterDomain: "selfdefine.domain",
+			expect:        "app.default.svc.selfdefine.domain:50001",
+		},
+	}
+	for _, tc := range testCases {
+		dns := getServiceAddress(tc.name, tc.namespace, tc.clusterDomain, tc.port)
+		assert.Equal(t, tc.expect, dns)
+	}
 }
 
 func TestGetMetricsPort(t *testing.T) {
@@ -204,7 +211,7 @@ func TestGetContainer(t *testing.T) {
 	annotations[daprConfigKey] = "config"
 	annotations[daprAppPortKey] = appPort
 
-	c, _ := getSidecarContainer(annotations, "app", "image", "Always", "localhost", "ns", "a", "b", nil, "", "", "", "", false, "")
+	c, _ := getSidecarContainer(annotations, "app", "image", "Always", "ns", "a", "b", nil, "", "", "", "", false, "")
 
 	assert.NotNil(t, c)
 	assert.Equal(t, "image", c.Image)
@@ -219,7 +226,7 @@ func TestSidecarResourceLimits(t *testing.T) {
 		annotations[daprCPULimitKey] = "100m"
 		annotations[daprMemoryLimitKey] = "1Gi"
 
-		c, _ := getSidecarContainer(annotations, "app", "image", "Always", "localhost", "ns", "a", "b", nil, "", "", "", "", false, "")
+		c, _ := getSidecarContainer(annotations, "app", "image", "Always", "ns", "a", "b", nil, "", "", "", "", false, "")
 		assert.NotNil(t, c)
 		assert.Equal(t, "100m", c.Resources.Limits.Cpu().String())
 		assert.Equal(t, "1Gi", c.Resources.Limits.Memory().String())
@@ -233,7 +240,7 @@ func TestSidecarResourceLimits(t *testing.T) {
 		annotations[daprCPURequestKey] = "100m"
 		annotations[daprMemoryRequestKey] = "1Gi"
 
-		c, _ := getSidecarContainer(annotations, "app", "image", "Always", "localhost", "ns", "a", "b", nil, "", "", "", "", false, "")
+		c, _ := getSidecarContainer(annotations, "app", "image", "Always", "ns", "a", "b", nil, "", "", "", "", false, "")
 		assert.NotNil(t, c)
 		assert.Equal(t, "100m", c.Resources.Requests.Cpu().String())
 		assert.Equal(t, "1Gi", c.Resources.Requests.Memory().String())
@@ -245,7 +252,7 @@ func TestSidecarResourceLimits(t *testing.T) {
 		annotations[daprAppPortKey] = appPort
 		annotations[daprLogAsJSON] = "true"
 
-		c, _ := getSidecarContainer(annotations, "app", "image", "Always", "localhost", "ns", "a", "b", nil, "", "", "", "", false, "")
+		c, _ := getSidecarContainer(annotations, "app", "image", "Always", "ns", "a", "b", nil, "", "", "", "", false, "")
 		assert.NotNil(t, c)
 		assert.Len(t, c.Resources.Limits, 0)
 	})
@@ -379,7 +386,7 @@ func TestAppSSL(t *testing.T) {
 		annotations := map[string]string{
 			daprAppSSLKey: "true",
 		}
-		c, _ := getSidecarContainer(annotations, "app", "image", "", "localhost", "ns", "a", "b", nil, "", "", "", "", false, "")
+		c, _ := getSidecarContainer(annotations, "app", "image", "", "ns", "a", "b", nil, "", "", "", "", false, "")
 		found := false
 		for _, a := range c.Args {
 			if a == "--app-ssl" {
@@ -394,7 +401,7 @@ func TestAppSSL(t *testing.T) {
 		annotations := map[string]string{
 			daprAppSSLKey: "false",
 		}
-		c, _ := getSidecarContainer(annotations, "app", "image", "Always", "localhost", "ns", "a", "b", nil, "", "", "", "", false, "")
+		c, _ := getSidecarContainer(annotations, "app", "image", "Always", "ns", "a", "b", nil, "", "", "", "", false, "")
 		for _, a := range c.Args {
 			if a == "--app-ssl" {
 				t.FailNow()
@@ -404,7 +411,7 @@ func TestAppSSL(t *testing.T) {
 
 	t.Run("get sidecar container not specified", func(t *testing.T) {
 		annotations := map[string]string{}
-		c, _ := getSidecarContainer(annotations, "app", "image", "Always", "localhost", "ns", "a", "b", nil, "", "", "", "", false, "")
+		c, _ := getSidecarContainer(annotations, "app", "image", "Always", "ns", "a", "b", nil, "", "", "", "", false, "")
 		for _, a := range c.Args {
 			if a == "--app-ssl" {
 				t.FailNow()

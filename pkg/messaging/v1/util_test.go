@@ -1,5 +1,5 @@
 // ------------------------------------------------------------
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Microsoft Corporation and Dapr Contributors.
 // Licensed under the MIT License.
 // ------------------------------------------------------------
 
@@ -12,12 +12,13 @@ import (
 	"strings"
 	"testing"
 
-	internalv1pb "github.com/dapr/dapr/pkg/proto/internals/v1"
 	"github.com/stretchr/testify/assert"
 	epb "google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+
+	internalv1pb "github.com/dapr/dapr/pkg/proto/internals/v1"
 )
 
 func TestInternalMetadataToHTTPHeader(t *testing.T) {
@@ -50,7 +51,7 @@ func TestInternalMetadataToHTTPHeader(t *testing.T) {
 }
 
 func TestGrpcMetadataToInternalMetadata(t *testing.T) {
-	var keyBinValue = []byte{101, 200}
+	keyBinValue := []byte{101, 200}
 	testMD := metadata.Pairs(
 		"key", "key value",
 		"key-bin", string(keyBinValue),
@@ -65,7 +66,7 @@ func TestGrpcMetadataToInternalMetadata(t *testing.T) {
 }
 
 func TestIsJSONContentType(t *testing.T) {
-	var contentTypeTests = []struct {
+	contentTypeTests := []struct {
 		in  string
 		out bool
 	}{
@@ -122,7 +123,7 @@ func TestInternalMetadataToGrpcMetadata(t *testing.T) {
 		// always trace header is returned
 		assert.Equal(t, 11, convertedMD.Len())
 
-		var testHeaders = []struct {
+		testHeaders := []struct {
 			key      string
 			expected string
 		}{
@@ -148,7 +149,7 @@ func TestInternalMetadataToGrpcMetadata(t *testing.T) {
 		// always trace header is returned
 		assert.Equal(t, 11, convertedMD.Len())
 
-		var testHeaders = []struct {
+		testHeaders := []struct {
 			key      string
 			expected string
 		}{
@@ -169,8 +170,8 @@ func TestInternalMetadataToGrpcMetadata(t *testing.T) {
 		}
 	})
 
-	var keyBinValue = []byte{100, 50}
-	var keyBinEncodedValue = base64.StdEncoding.EncodeToString(keyBinValue)
+	keyBinValue := []byte{100, 50}
+	keyBinEncodedValue := base64.StdEncoding.EncodeToString(keyBinValue)
 
 	traceBinValue := []byte{10, 30, 50, 60}
 	traceBinValueEncodedValue := base64.StdEncoding.EncodeToString(traceBinValue)
@@ -326,4 +327,24 @@ func TestCloneBytes(t *testing.T) {
 		assert.Equal(t, orig, cloneBytes(orig))
 		assert.NotSame(t, orig, cloneBytes(orig))
 	})
+}
+
+func TestProtobufToJSON(t *testing.T) {
+	tpb := &epb.DebugInfo{
+		StackEntries: []string{
+			"first stack",
+			"second stack",
+		},
+	}
+
+	jsonBody, err := ProtobufToJSON(tpb)
+	assert.NoError(t, err)
+	t.Log(string(jsonBody))
+
+	// protojson produces different indentation space based on OS
+	// For linux
+	comp1 := string(jsonBody) == "{\"stackEntries\":[\"first stack\",\"second stack\"]}"
+	// For mac and windows
+	comp2 := string(jsonBody) == "{\"stackEntries\":[\"first stack\", \"second stack\"]}"
+	assert.True(t, comp1 || comp2)
 }

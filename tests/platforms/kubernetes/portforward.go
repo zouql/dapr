@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 
 	"github.com/phayes/freeport"
 	apiv1 "k8s.io/api/core/v1"
@@ -17,7 +16,7 @@ import (
 	"k8s.io/client-go/transport/spdy"
 )
 
-// PodPortFowarder implements the PortForwarder interface for Kubernetes
+// PodPortFowarder implements the PortForwarder interface for Kubernetes.
 type PodPortForwarder struct {
 	// Kubernetes client
 	client *KubeClient
@@ -29,7 +28,7 @@ type PodPortForwarder struct {
 	readyChannel chan struct{}
 }
 
-// PortForwardRequest encapsulates data required to establish a Kuberentes tunnel
+// PortForwardRequest encapsulates data required to establish a Kuberentes tunnel.
 type PortForwardRequest struct {
 	// restConfig is the kubernetes config
 	restConfig *rest.Config
@@ -47,7 +46,7 @@ type PortForwardRequest struct {
 	readyChannel chan struct{}
 }
 
-// NewPodPortForwarder returns a new PodPortForwarder
+// NewPodPortForwarder returns a new PodPortForwarder.
 func NewPodPortForwarder(c *KubeClient, namespace string) *PodPortForwarder {
 	return &PodPortForwarder{
 		client:       c,
@@ -57,7 +56,7 @@ func NewPodPortForwarder(c *KubeClient, namespace string) *PodPortForwarder {
 	}
 }
 
-// Connect establishes a new connection to a given app on the provided target ports
+// Connect establishes a new connection to a given app on the provided target ports.
 func (p *PodPortForwarder) Connect(name string, targetPorts ...int) ([]int, error) {
 	if name == "" {
 		return nil, fmt.Errorf("name must be set to establish connection")
@@ -103,7 +102,6 @@ func (p *PodPortForwarder) Connect(name string, targetPorts ...int) ([]int, erro
 		stopChannel:  p.stopChannel,
 		readyChannel: p.readyChannel,
 	})
-
 	if err != nil {
 		return nil, err
 	}
@@ -128,10 +126,11 @@ func startPortForwarding(req PortForwardRequest) error {
 	}
 
 	path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", req.pod.Namespace, req.pod.Name)
-	hostIP := strings.TrimLeft(req.restConfig.Host, "htps:/")
-	serverURL := url.URL{Scheme: "https", Path: path, Host: hostIP}
+	serverURL, _ := url.Parse(req.restConfig.Host)
+	serverURL.Scheme = "https"
+	serverURL.Path = path
 
-	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: roundTripper}, http.MethodPost, &serverURL)
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: roundTripper}, http.MethodPost, serverURL)
 
 	var ports []string //nolint: prealloc
 	for i, p := range req.podPorts {
